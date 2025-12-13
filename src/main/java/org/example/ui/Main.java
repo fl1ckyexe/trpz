@@ -1,48 +1,58 @@
 package org.example.ui;
 
-import org.example.controller.DownloadController;
 import org.example.core.DownloadManager;
 import org.example.downloader.HttpDownloader;
-import org.example.observer.ConsoleDownloadObserver;
-import org.example.observer.StatisticObserver;
-import org.example.segment.HttpRangePeer;
-import org.example.segment.Peer;
 import org.example.segment.SegmentManager;
 import org.example.speed.SpeedControl;
+import org.example.storage.LocalStorage;
 import org.example.storage.SQLiteStorage;
-
-
-import java.util.List;
-
 
 public class Main {
 
     public static void main(String[] args) {
 
-        // Storage
-        var storage = new SQLiteStorage("downloadmanager.db");
 
-        // Core components
+        LocalStorage storage = new SQLiteStorage("src/main/java/org/example/data/downloadmanager.db");
+        storage.init();
+
+
         var downloader = new HttpDownloader();
-        var speed = new SpeedControl(0); // unlimited by default
+        var speedControl = new SpeedControl(0);
         var segmentManager = new SegmentManager();
 
-        var manager = new DownloadManager(storage, downloader, speed, segmentManager);
-
-        // Observers
-        manager.addObserver(new ConsoleDownloadObserver());
-        manager.addObserver(new StatisticObserver());
-
-        // Peers (HTTP sources)
-        List<Peer> peers = List.of(
-                new HttpRangePeer("peer1", "https://speed.hetzner.de/100MB.bin"),
-                new HttpRangePeer("peer2", "https://speed.hetzner.de/100MB.bin")
+        var manager = new DownloadManager(
+                storage,
+                downloader,
+                speedControl,
+                segmentManager
         );
-        manager.setPeers(peers);
 
-        // Controller + UI
-        var controller = new DownloadController(manager);
-        var ui = new UserInterface(controller);
-        ui.runConsole();
+        var task = manager.addDownload(
+                "https://speed.hetzner.de/100MB.bin",
+                "test.bin"
+        );
+
+        System.out.println("Created task id = " + task.getId());
+
+        manager.start(task.getId());
+
+        sleep(3000);
+        manager.pause(task.getId());
+
+        sleep(2000);
+        manager.resume(task.getId());
+
+        sleep(3000);
+        manager.stop(task.getId());
+
+
+        System.out.println("Test finished");
+    }
+
+    private static void sleep(long ms) {
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException ignored) {
+        }
     }
 }
