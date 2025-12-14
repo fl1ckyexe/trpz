@@ -1,0 +1,45 @@
+/* ===== general ===== */
+.root {
+    -fx-font-family: "Segoe UI";
+}
+
+/* ===== panels ===== */
+.vbox {
+    -fx-background-color: #eeeeee;
+    -fx-background-radius: 10;
+}
+
+/* ===== list ===== */
+.list-view {
+    -fx-background-radius: 8;
+}
+
+/* ===== log ===== */
+.text-area {
+    -fx-control-inner-background: #f7f7f7;
+    -fx-font-family: Consolas;
+}
+
+/* ===== buttons ===== */
+.button {
+    -fx-background-color: #ffffff;
+    -fx-text-fill: #000000;
+    -fx-background-radius: 6;
+    -fx-border-radius: 6;
+}
+
+.button:hover {
+    -fx-background-color: #e0e0e0;
+}
+
+/* ===== window buttons ===== */
+.window-button {
+    -fx-background-color: transparent;
+    -fx-text-fill: white;
+    -fx-font-size: 14;
+    -fx-padding: 4 10;
+}
+
+.window-button:hover {
+    -fx-background-color: #444444;
+}

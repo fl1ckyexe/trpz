@@ -1,15 +1,12 @@
-
 package org.example.core;
 
 import org.example.downloader.AbstractDownloader;
 import org.example.model.*;
-import org.example.model.DownloadTask;
 import org.example.observer.DownloadObserver;
 import org.example.segment.Peer;
 import org.example.segment.SegmentManager;
 import org.example.speed.SpeedControl;
 import org.example.storage.LocalStorage;
-
 import java.util.*;
 import java.util.concurrent.CopyOnWriteArrayList;
 
@@ -21,9 +18,12 @@ public class DownloadManager {
     private final SegmentManager segmentManager;
 
     private final Map<Long, DownloadTask> tasksCache = new HashMap<>();
+    private final Map<Long, DownloadControl> controls = new HashMap<>();
+
     private final List<DownloadObserver> observers = new CopyOnWriteArrayList<>();
 
-    private volatile long currentTaskId = -1; // для простоти (1 активне завантаження в каркасі)
+    private Thread worker;
+    private volatile long currentTaskId = -1;
 
     private List<Peer> peers = new ArrayList<>();
 
@@ -35,33 +35,26 @@ public class DownloadManager {
         this.downloader = downloader;
         this.speedControl = speedControl;
         this.segmentManager = segmentManager;
-
         storage.init();
     }
 
-    // OBSERVER
-    public void addObserver(DownloadObserver observer) { observers.add(observer); }
-    public void removeObserver(DownloadObserver observer) { observers.remove(observer); }
-
-    private void notifyTaskChanged(DownloadTask task) {
-        for (DownloadObserver o : observers) o.onTaskChanged(task);
+    public void addObserver(DownloadObserver o) {
+        observers.add(o);
     }
-
-    private void log(String msg) {
-        for (DownloadObserver o : observers) o.onLog(msg);
-    }
-
-    // CONFIG
-    public void setPeers(List<Peer> peers) {
-        this.peers = new ArrayList<>(peers);
-    }
-
     public void setSpeedLimitBytesPerSec(long bytesPerSec) {
         speedControl.setMaxBytesPerSec(bytesPerSec);
         log("Speed limit set to " + bytesPerSec + " B/s");
     }
 
-    // TASKS
+
+    private void notifyTaskChanged(DownloadTask t) {
+        observers.forEach(o -> o.onTaskChanged(t));
+    }
+
+    private void log(String msg) {
+        observers.forEach(o -> o.onLog(msg));
+    }
+
     public DownloadTask addDownload(String url, String fileName) {
         DownloadTask task = storage.createTask(url, fileName);
         tasksCache.put(task.getId(), task);
@@ -69,132 +62,161 @@ public class DownloadManager {
         return task;
     }
 
-    public Optional<DownloadTask> getTask(long taskId) {
-        if (tasksCache.containsKey(taskId)) return Optional.of(tasksCache.get(taskId));
-        Optional<DownloadTask> db = storage.findTask(taskId);
-        db.ifPresent(t -> tasksCache.put(taskId, t));
-        return db;
+    public Optional<DownloadTask> getTask(long id) {
+        if (tasksCache.containsKey(id)) return Optional.of(tasksCache.get(id));
+        Optional<DownloadTask> t = storage.findTask(id);
+        t.ifPresent(x -> tasksCache.put(id, x));
+        return t;
     }
 
-    // LIFECYCLE
     public void start(long taskId) {
-        DownloadTask task = getTask(taskId).orElseThrow();
-        if (task.getStatus() == DownloadStatus.RUNNING) return;
 
+        DownloadTask task = getTask(taskId).orElseThrow();
         currentTaskId = taskId;
+
+        DownloadControl control = new DownloadControl();
+        controls.put(taskId, control);
+
         task.setStatus(DownloadStatus.RUNNING);
         storage.updateTask(task);
         notifyTaskChanged(task);
 
-        // load segments or create if empty
         List<DownloadSegment> segments = storage.loadSegments(taskId);
-        if (segments.isEmpty()) {
-            // very simple segmentation: 4 segments with fake total
-            // (real total should be detected by HEAD/GET content-length)
-            long fakeTotal = 4 * 1024 * 1024;
-            task.setTotalBytes(fakeTotal);
-            storage.updateTask(task);
 
-            segments = createSegments(taskId, fakeTotal, 4);
-            storage.saveSegments(taskId, segments);
+        if (segments.isEmpty()) {
+            long total = downloader.probeContentLength(task.getUrl());
+
+            if (total <= 0) {
+                log("No Content-Length, fallback to single stream");
+                segments = Collections.emptyList();
+            } else {
+                task.setTotalBytes(total);
+                storage.updateTask(task);
+
+                segments = createSegments(taskId, total, 4);
+                storage.saveSegments(taskId, segments);
+            }
         }
 
-        segmentManager.setSegments(segments);
-        log("Start download taskId=" + taskId + " segments=" + segments.size());
+        final List<DownloadSegment> segmentsFinal = segments;
+        segmentManager.setSegments(segmentsFinal);
 
-        // run sync in this demo; for real app use background threads
-        downloader.download(task, segments, peers, speedControl, new AbstractDownloader.DownloadCallbacks() {
-            @Override
-            public void onSegmentProgress(long tId, int segmentIndex, long segmentDownloadedBytes) {
-                if (tId != currentTaskId) return;
+        worker = new Thread(() -> downloader.download(
+                task,
+                segmentsFinal,
+                peers,
+                speedControl,
+                control,
+                new Callbacks(task)
+        ));
 
-                // update local segment state
-                List<DownloadSegment> segs = storage.loadSegments(tId);
-                for (DownloadSegment s : segs) {
-                    if (s.getIndex() == segmentIndex) {
-                        s.setDownloadedBytes(segmentDownloadedBytes);
-                        s.setStatus(segmentDownloadedBytes >= s.getLength() ? SegmentStatus.COMPLETED : SegmentStatus.RUNNING);
-                        storage.updateSegment(s);
-                        break;
-                    }
-                }
-
-                // update task progress (sum segment downloaded)
-                long sum = 0;
-                for (DownloadSegment s : segs) sum += s.getDownloadedBytes();
-                task.setDownloadedBytes(sum);
-                storage.updateTask(task);
-                notifyTaskChanged(task);
-            }
-
-            @Override
-            public void onLog(String msg) {
-                log(msg);
-            }
-
-            @Override
-            public void onCompleted(long tId) {
-                if (tId != currentTaskId) return;
-                task.setStatus(DownloadStatus.COMPLETED);
-                storage.updateTask(task);
-                notifyTaskChanged(task);
-                log("Task completed: " + tId);
-            }
-
-            @Override
-            public void onError(long tId, Exception e) {
-                if (tId != currentTaskId) return;
-                task.setStatus(DownloadStatus.FAILED);
-                storage.updateTask(task);
-                notifyTaskChanged(task);
-                log("Task failed: " + tId + " error=" + e.getMessage());
-            }
-        });
+        worker.setDaemon(true);
+        worker.start();
     }
 
     public void pause(long taskId) {
-        DownloadTask task = getTask(taskId).orElseThrow();
-        task.setStatus(DownloadStatus.PAUSED);
-        storage.updateTask(task);
-        notifyTaskChanged(task);
-        log("Paused taskId=" + taskId);
-        // Реальна реалізація: зупинка потоків / cancellation tokens
+        DownloadControl c = controls.get(taskId);
+        if (c != null) c.pause();
+        updateStatus(taskId, DownloadStatus.PAUSED);
     }
 
     public void resume(long taskId) {
-        DownloadTask task = getTask(taskId).orElseThrow();
-        if (task.getStatus() != DownloadStatus.PAUSED) return;
-        log("Resume taskId=" + taskId);
-        start(taskId);
+        DownloadControl c = controls.get(taskId);
+        if (c != null) c.resume();
+        updateStatus(taskId, DownloadStatus.RUNNING);
     }
 
     public void stop(long taskId) {
-        DownloadTask task = getTask(taskId).orElseThrow();
-        task.setStatus(DownloadStatus.FAILED);
-        storage.updateTask(task);
-        notifyTaskChanged(task);
-        log("Stopped taskId=" + taskId);
-        // Реальна реалізація: cancellation
+        DownloadControl c = controls.get(taskId);
+        if (c != null) c.cancel();
+        updateStatus(taskId, DownloadStatus.FAILED);
+    }
+    public AbstractDownloader getDownloader() {
+        return downloader;
     }
 
-    private List<DownloadSegment> createSegments(long taskId, long totalBytes, int count) {
+
+    private void updateStatus(long taskId, DownloadStatus st) {
+        getTask(taskId).ifPresent(t -> {
+            t.setStatus(st);
+            storage.updateTask(t);
+            notifyTaskChanged(t);
+        });
+    }
+
+    private List<DownloadSegment> createSegments(long taskId, long total, int count) {
         List<DownloadSegment> list = new ArrayList<>();
-        long part = totalBytes / count;
+        long part = total / count;
         long start = 0;
+
         for (int i = 0; i < count; i++) {
-            long end = (i == count - 1) ? totalBytes - 1 : (start + part - 1);
+            long end = (i == count - 1) ? total - 1 : start + part - 1;
             list.add(new DownloadSegment(0, taskId, i, start, end));
             start = end + 1;
         }
         return list;
     }
 
-    // Iterator usage (over SegmentManager)
+    private class Callbacks implements AbstractDownloader.DownloadCallbacks {
+
+        private final DownloadTask task;
+
+        Callbacks(DownloadTask task) {
+            this.task = task;
+        }
+
+        @Override
+        public void onSegmentProgress(long taskId, int idx, long downloaded) {
+
+            List<DownloadSegment> segs = storage.loadSegments(taskId);
+
+            for (DownloadSegment s : segs) {
+                if (s.getIndex() == idx) {
+                    s.setDownloadedBytes(downloaded);
+                    s.setStatus(
+                            downloaded >= s.getLength()
+                                    ? SegmentStatus.COMPLETED
+                                    : SegmentStatus.RUNNING
+                    );
+                    storage.updateSegment(s);
+                }
+            }
+
+            long sum = segs.stream().mapToLong(DownloadSegment::getDownloadedBytes).sum();
+            task.setDownloadedBytes(sum);
+            storage.updateTask(task);
+            notifyTaskChanged(task);
+        }
+
+        @Override public void onLog(String msg) { log(msg); }
+
+        @Override
+        public void onCompleted(long taskId) {
+            task.setStatus(DownloadStatus.COMPLETED);
+            storage.updateTask(task);
+            notifyTaskChanged(task);
+            log("Task completed: " + taskId);
+        }
+
+        @Override
+        public void onError(long taskId, Exception e) {
+            task.setStatus(DownloadStatus.FAILED);
+            storage.updateTask(task);
+            notifyTaskChanged(task);
+            log("Task failed: " + e.getMessage());
+        }
+    }
+
     public void printSegments(long taskId) {
         List<DownloadSegment> segs = storage.loadSegments(taskId);
         segmentManager.setSegments(segs);
+
         for (DownloadSegment s : segmentManager) {
-            log("Segment idx=" + s.getIndex() + " range=" + s.getStartByte() + "-" + s.getEndByte());
+            log("Segment idx=" + s.getIndex()
+                    + " range=" + s.getStartByte() + "-" + s.getEndByte()
+                    + " downloaded=" + s.getDownloadedBytes()
+                    + " status=" + s.getStatus());
         }
     }
+
 }

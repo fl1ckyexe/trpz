@@ -1,5 +1,7 @@
 plugins {
-    id("java")
+    java
+    application
+    id("org.openjfx.javafxplugin") version "0.1.0"
 }
 
 group = "org.example"
@@ -9,19 +11,37 @@ repositories {
     mavenCentral()
 }
 
+java {
+    toolchain {
+        languageVersion.set(JavaLanguageVersion.of(21))
+    }
+}
+
+javafx {
+    version = "21"
+    modules = listOf(
+        "javafx.controls",
+        "javafx.graphics",
+        "javafx.base"
+    )
+}
+
 dependencies {
-    testImplementation(platform("org.junit:junit-bom:5.10.0"))
-    testImplementation("org.junit.jupiter:junit-jupiter")
-    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+    // SQLite
     implementation("org.xerial:sqlite-jdbc:3.46.1.0")
-    // SQLite JDBC
-    implementation("org.xerial:sqlite-jdbc:3.46.0.0")
-    // SLF4J
+
+    // Logging (щоб не було warning'ів)
     implementation("org.slf4j:slf4j-api:2.0.13")
     implementation("org.slf4j:slf4j-simple:2.0.13")
-    // JavaFX
-    implementation("org.openjfx:javafx-controls:21")
-    implementation("org.openjfx:javafx-fxml:21")
+
+    // Tests
+    testImplementation(platform("org.junit:junit-bom:5.10.0"))
+    testImplementation("org.junit.jupiter:junit-jupiter")
+}
+
+application {
+    // ВАЖЛИВО: JavaFX Application class
+    mainClass.set("org.example.ui.DownloadApp")
 }
 
 tasks.test {
