@@ -16,9 +16,11 @@ public interface LocalStorage {
 
     void updateTask(DownloadTask task);
 
+
+
     void saveSegments(long taskId, List<DownloadSegment> segments);
 
     List<DownloadSegment> loadSegments(long taskId);
-
+    List<DownloadTask> loadAllTasks();
     void updateSegment(DownloadSegment segment);
 }

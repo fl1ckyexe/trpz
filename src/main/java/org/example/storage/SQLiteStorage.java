@@ -122,6 +122,38 @@ public class SQLiteStorage implements LocalStorage {
             throw new RuntimeException("SQLite findTask failed", e);
         }
     }
+    @Override
+    public List<DownloadTask> loadAllTasks() {
+        String sql = """
+        SELECT id, url, file_name, status, total_bytes, downloaded_bytes
+        FROM download_tasks
+    """;
+
+        List<DownloadTask> list = new ArrayList<>();
+
+        try (Connection c = connect();
+             PreparedStatement ps = c.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+
+            while (rs.next()) {
+                DownloadTask t = new DownloadTask(
+                        rs.getLong("id"),
+                        rs.getString("url"),
+                        rs.getString("file_name")
+                );
+                t.setStatus(DownloadStatus.valueOf(rs.getString("status")));
+                t.setTotalBytes(rs.getLong("total_bytes"));
+                t.setDownloadedBytes(rs.getLong("downloaded_bytes"));
+                list.add(t);
+            }
+
+        } catch (SQLException e) {
+            throw new RuntimeException(e);
+        }
+
+        return list;
+    }
+
 
     @Override
     public void updateTask(DownloadTask task) {

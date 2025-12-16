@@ -23,6 +23,7 @@ import org.example.storage.SQLiteStorage;
 import java.io.File;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.List;
 
 public class DownloadApp extends Application {
 
@@ -34,19 +35,15 @@ public class DownloadApp extends Application {
 
     private TextArea logArea;
     private TextField urlField;
-
-    // ===== File name + extension (NEW) =====
     private TextField fileNameField;
     private ComboBox<String> extensionBox;
 
     private ProgressBar progressBar;
     private Label progressText;
 
-    // ===== Speed UI =====
+    // ===== Speed =====
     private TextField speedField;
     private Label realSpeedLabel;
-
-    // ===== Speed calc =====
     private long lastBytes = 0;
     private long lastTime = 0;
 
@@ -68,7 +65,8 @@ public class DownloadApp extends Application {
                 storage,
                 new HttpDownloader(),
                 new SpeedControl(0),
-                new SegmentManager()
+                new SegmentManager(),
+                settings
         );
 
         manager.addObserver(new UiObserver());
@@ -107,6 +105,8 @@ public class DownloadApp extends Application {
         Label menuTitle = createLabel("Download\nManager", 16);
 
         Button resumeBtn = createMenuButton("Resume downloads");
+        resumeBtn.setOnAction(e -> showResumeWindow(stage));
+
         Button settingsBtn = createMenuButton("Settings");
         settingsBtn.setOnAction(e -> showSettingsWindow(stage));
 
@@ -119,28 +119,19 @@ public class DownloadApp extends Application {
 
         urlField = createTextField("Download URL");
 
-        // ===== File name + extension =====
-        fileNameField = createTextField("File name");
+        fileNameField = createTextField("File name (without extension)");
 
         extensionBox = new ComboBox<>();
         extensionBox.getItems().addAll(
-                "mp4",
-                "webm",
-                "mov",
-                "jpg",
-                "png",
-                "gif",
-                "pdf",
-                "zip",
-                "bin"
+                "mp4", "webm", "mov",
+                "jpg", "png", "gif",
+                "pdf", "zip", "bin"
         );
-
         extensionBox.setValue("bin");
 
-        HBox fileRow = new HBox(10, fileNameField, extensionBox);
+        urlField.textProperty().addListener((o, ov, nv) -> detectExtension(nv));
 
-        // HEAD-detect on URL change
-        urlField.textProperty().addListener((obs, o, n) -> detectExtension(n));
+        HBox fileRow = new HBox(10, fileNameField, extensionBox);
 
         Button addBtn = createActionButton("Add");
         Button startBtn = createActionButton("Start");
@@ -158,7 +149,7 @@ public class DownloadApp extends Application {
         realSpeedLabel = new Label("Actual: 0.00 MB/s");
         realSpeedLabel.setTextFill(Color.web(COLOR_ASH));
 
-        speedField.textProperty().addListener((obs, o, n) -> applySpeedLimit(n));
+        speedField.textProperty().addListener((o, ov, nv) -> applySpeedLimit(nv));
 
         HBox speedBox = new HBox(10, speedField, realSpeedLabel);
 
@@ -166,12 +157,6 @@ public class DownloadApp extends Application {
         progressBar = new ProgressBar(0);
         progressBar.setPrefHeight(14);
         progressBar.setMaxWidth(Double.MAX_VALUE);
-
-        progressBar.setStyle("""
-                -fx-accent: %s;
-                -fx-control-inner-background: #2b2b2b;
-                -fx-background-radius: 6;
-                """.formatted(COLOR_ASH));
 
         progressText = createLabel("Progress: 0%", 12);
         progressText.setTextFill(Color.web(COLOR_ASH));
@@ -182,11 +167,6 @@ public class DownloadApp extends Application {
         logArea = new TextArea();
         logArea.setEditable(false);
         logArea.setWrapText(true);
-        logArea.setStyle("""
-                -fx-control-inner-background: #2b2b2b;
-                -fx-text-fill: white;
-                -fx-font-size: 12;
-                """);
 
         content.getChildren().addAll(
                 createLabel("URL", 12),
@@ -202,18 +182,10 @@ public class DownloadApp extends Application {
 
         // ===== Actions =====
         addBtn.setOnAction(e -> addTask());
-        startBtn.setOnAction(e -> {
-            if (currentTaskId >= 0) manager.start(currentTaskId);
-        });
-        pauseBtn.setOnAction(e -> {
-            if (currentTaskId >= 0) manager.pause(currentTaskId);
-        });
-        resumeDownloadBtn.setOnAction(e -> {
-            if (currentTaskId >= 0) manager.resume(currentTaskId);
-        });
-        stopBtn.setOnAction(e -> {
-            if (currentTaskId >= 0) manager.stop(currentTaskId);
-        });
+        startBtn.setOnAction(e -> startCurrent());
+        pauseBtn.setOnAction(e -> pauseCurrent());
+        resumeDownloadBtn.setOnAction(e -> resumeCurrent());
+        stopBtn.setOnAction(e -> stopCurrent());
 
         BorderPane main = new BorderPane();
         main.setTop(titleBar);
@@ -224,9 +196,94 @@ public class DownloadApp extends Application {
         stage.show();
 
         log("Download folder: " + settings.getDownloadDir());
+        log("Incomplete folder: " + settings.getIncompleteDir());
     }
 
-    // ===== HEAD detect (SAFE) =====
+    // =========================
+    // Resume window
+    // =========================
+    private void showResumeWindow(Stage owner) {
+        Stage s = new Stage();
+        s.initOwner(owner);
+        s.initModality(Modality.WINDOW_MODAL);
+        s.setTitle("Resume downloads");
+
+        ListView<DownloadTask> list = new ListView<>();
+        List<DownloadTask> unfinished = manager.getUnfinishedTasks();
+        list.getItems().addAll(unfinished);
+
+        list.setCellFactory(v -> new ListCell<>() {
+            @Override
+            protected void updateItem(DownloadTask t, boolean empty) {
+                super.updateItem(t, empty);
+                if (t == null || empty) {
+                    setText(null);
+                } else {
+                    setText(t.getFileName() + " [" + t.getStatus() + "]");
+                }
+            }
+        });
+
+        Button resumeBtn = new Button("Resume");
+        resumeBtn.setOnAction(e -> {
+            DownloadTask t = list.getSelectionModel().getSelectedItem();
+            if (t != null) {
+                currentTaskId = t.getId();
+                manager.resume(t.getId());
+                s.close();
+            }
+        });
+
+        VBox root = new VBox(10, list, resumeBtn);
+        root.setPadding(new Insets(12));
+
+        s.setScene(new Scene(root, 420, 300));
+        s.showAndWait();
+    }
+
+    // =========================
+    // Download actions
+    // =========================
+    private void addTask() {
+        if (urlField.getText().isBlank() || fileNameField.getText().isBlank()) {
+            log("URL or file name is empty");
+            return;
+        }
+
+        String finalName =
+                fileNameField.getText().trim() + "." + extensionBox.getValue();
+
+        Path finalPath = settings.getDownloadDir().resolve(finalName);
+
+        DownloadTask task =
+                manager.addDownload(urlField.getText().trim(), finalPath.toString());
+
+        currentTaskId = task.getId();
+        lastBytes = 0;
+        lastTime = 0;
+
+        log("Task created: " + finalPath);
+    }
+
+    private void startCurrent() {
+        if (currentTaskId >= 0) manager.start(currentTaskId);
+    }
+
+    private void pauseCurrent() {
+        if (currentTaskId >= 0) manager.pause(currentTaskId);
+    }
+
+    private void resumeCurrent() {
+        if (currentTaskId >= 0) manager.resume(currentTaskId);
+    }
+
+    private void stopCurrent() {
+        if (currentTaskId >= 0) manager.stop(currentTaskId);
+    }
+
+    // =========================
+    // HEAD detect
+    // =========================
     private void detectExtension(String url) {
         if (url == null || url.isBlank()) return;
 
@@ -238,53 +295,21 @@ public class DownloadApp extends Application {
         }).start();
     }
 
-    // ===== Add task (WORKING) =====
-    private void addTask() {
-        if (urlField.getText().isBlank() || fileNameField.getText().isBlank()) {
-            log("URL or file name is empty");
-            return;
-        }
-
-        String finalName =
-                fileNameField.getText().trim() + "." + extensionBox.getValue();
-
-        String filePath =
-                settings.getDownloadDir().resolve(finalName).toString();
-
-        DownloadTask task =
-                manager.addDownload(urlField.getText().trim(), filePath);
-
-        currentTaskId = task.getId();
-
-        lastBytes = 0;
-        lastTime = 0;
-
-        setProgressUi(task);
-        log("Task created: " + filePath);
-    }
-
-    // ===== Speed logic =====
+    // =========================
+    // Speed
+    // =========================
     private void applySpeedLimit(String text) {
         try {
-            if (text == null || text.isBlank()) {
-                manager.setSpeedLimitBytesPerSec(0);
-                return;
-            }
-
             double mb = Double.parseDouble(text);
-            if (mb <= 0 || mb > 20) {
+            if (mb <= 0 || mb > 20)
                 manager.setSpeedLimitBytesPerSec(0);
-                return;
-            }
-
-            manager.setSpeedLimitBytesPerSec((long) (mb * 1024 * 1024));
-
+            else
+                manager.setSpeedLimitBytesPerSec((long) (mb * 1024 * 1024));
         } catch (Exception e) {
             manager.setSpeedLimitBytesPerSec(0);
         }
     }
 
-    // ===== Real speed =====
     private void updateRealSpeed(DownloadTask task) {
         long now = System.currentTimeMillis();
 
@@ -298,70 +323,73 @@ public class DownloadApp extends Application {
         if (dt < 500) return;
 
         long delta = task.getDownloadedBytes() - lastBytes;
-        if (delta < 0) return;
-
         double speed = (delta * 1000.0 / dt) / (1024 * 1024);
+
         realSpeedLabel.setText(String.format("Actual: %.2f MB/s", speed));
 
         lastTime = now;
         lastBytes = task.getDownloadedBytes();
     }
 
-    // ===== Settings =====
+    // =========================
+    // Settings window
+    // =========================
     private void showSettingsWindow(Stage owner) {
         Stage s = new Stage();
         s.initOwner(owner);
         s.initModality(Modality.WINDOW_MODAL);
+        s.setTitle("Settings");
 
-        TextField dirField = new TextField(settings.getDownloadDir().toString());
-        Button browse = new Button("Browse...");
-        browse.setOnAction(e -> {
+        TextField downloadDirField =
+                new TextField(settings.getDownloadDir().toString());
+        TextField incompleteDirField =
+                new TextField(settings.getIncompleteDir().toString());
+
+        Button browseDownload = new Button("Browse...");
+        browseDownload.setOnAction(e -> {
             DirectoryChooser ch = new DirectoryChooser();
-            ch.setInitialDirectory(settings.getDownloadDir().toFile());
             File f = ch.showDialog(s);
-            if (f != null) dirField.setText(f.getAbsolutePath());
+            if (f != null) downloadDirField.setText(f.getAbsolutePath());
+        });
+
+        Button browseIncomplete = new Button("Browse...");
+        browseIncomplete.setOnAction(e -> {
+            DirectoryChooser ch = new DirectoryChooser();
+            File f = ch.showDialog(s);
+            if (f != null) incompleteDirField.setText(f.getAbsolutePath());
         });
 
         Button save = new Button("Save");
         save.setOnAction(e -> {
-            Path p = Paths.get(dirField.getText());
-            if (p.toFile().exists()) {
-                settings.setDownloadDir(p);
-                settings.save();
-                log("Settings saved: " + p);
-                s.close();
-            }
+            settings.setDownloadDir(Paths.get(downloadDirField.getText()));
+            settings.setIncompleteDir(Paths.get(incompleteDirField.getText()));
+            settings.save();
+            log("Settings saved");
+            s.close();
         });
 
-        VBox root = new VBox(10, dirField, browse, save);
+        GridPane grid = new GridPane();
+        grid.setHgap(10);
+        grid.setVgap(10);
+
+        grid.add(new Label("Download folder:"), 0, 0);
+        grid.add(downloadDirField, 1, 0);
+        grid.add(browseDownload, 2, 0);
+
+        grid.add(new Label("Incomplete folder:"), 0, 1);
+        grid.add(incompleteDirField, 1, 1);
+        grid.add(browseIncomplete, 2, 1);
+
+        VBox root = new VBox(12, grid, save);
         root.setPadding(new Insets(12));
 
         s.setScene(new Scene(root));
         s.showAndWait();
     }
 
-    private void setProgressUi(DownloadTask task) {
-        Platform.runLater(() -> {
-            if (task.getTotalBytes() <= 0) {
-                progressBar.setProgress(ProgressIndicator.INDETERMINATE_PROGRESS);
-                progressText.setText("Progress: ...");
-            } else {
-                double p = task.getProgress01();
-                progressBar.setProgress(p);
-                progressText.setText(
-                        "Progress: " + (int) (p * 100) + "% (" +
-                                task.getDownloadedBytes() + "/" + task.getTotalBytes() + ")"
-                );
-            }
-            updateRealSpeed(task);
-        });
-    }
-
-    private void log(String msg) {
-        Platform.runLater(() -> logArea.appendText(msg + "\n"));
-    }
-
-    // ===== UI helpers =====
+    // =========================
+    // UI helpers
+    // =========================
     private Button createActionButton(String text) {
         Button b = new Button(text);
         b.setStyle("-fx-background-color: " + COLOR_ASH + "; -fx-text-fill: white;");
@@ -396,18 +424,34 @@ public class DownloadApp extends Application {
         return tf;
     }
 
-    // ===== Observer =====
+    // =========================
+    // Observer
+    // =========================
     private class UiObserver implements DownloadObserver {
         @Override
         public void onTaskChanged(DownloadTask task) {
             if (task.getId() != currentTaskId) return;
-            setProgressUi(task);
+
+            Platform.runLater(() -> {
+                if (task.getTotalBytes() > 0) {
+                    progressBar.setProgress(task.getProgress01());
+                    progressText.setText(
+                            "Progress: " +
+                                    (int) (task.getProgress01() * 100) + "%"
+                    );
+                }
+                updateRealSpeed(task);
+            });
         }
 
         @Override
         public void onLog(String message) {
             log(message);
         }
+    }
+
+    private void log(String msg) {
+        Platform.runLater(() -> logArea.appendText(msg + "\n"));
     }
 
     public static void main(String[] args) {

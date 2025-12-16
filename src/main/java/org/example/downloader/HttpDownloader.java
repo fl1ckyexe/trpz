@@ -3,6 +3,7 @@ package org.example.downloader;
 import org.example.core.DownloadControl;
 import org.example.model.DownloadSegment;
 import org.example.model.DownloadTask;
+import org.example.model.SegmentStatus;
 import org.example.segment.Peer;
 import org.example.speed.SpeedControl;
 
@@ -103,40 +104,24 @@ public class HttpDownloader extends AbstractDownloader {
 
 
     @Override
-    protected void doDownload(DownloadTask task,
-                              List<DownloadSegment> segments,
-                              List<Peer> peers,
-                              SpeedControl speedControl,
-                              DownloadControl control,
-                              DownloadCallbacks callbacks) throws Exception {
+    protected void doDownload(
+            DownloadTask task,
+            List<DownloadSegment> segments,
+            List<Peer> peers,
+            SpeedControl speed,
+            DownloadControl control,
+            DownloadCallbacks cb
+    ) throws Exception {
 
-        callbacks.onLog("Starting download: " + task.getUrl());
 
-        Path outPath = Paths.get(task.getFileName()).toAbsolutePath();
-        if (outPath.getParent() != null) {
-            outPath.getParent().toFile().mkdirs();
-        }
-
-        // 🔹 FALLBACK: если сегментов нет — обычный GET
-        if (segments == null || segments.isEmpty()) {
-            singleStreamDownload(task, outPath, speedControl, control, callbacks);
-            callbacks.onCompleted(task.getId());
-            return;
-        }
-
-        if (task.getTotalBytes() > 0) {
-            try (RandomAccessFile raf = new RandomAccessFile(outPath.toFile(), "rw")) {
-                raf.setLength(task.getTotalBytes());
-            }
-        }
 
         for (DownloadSegment seg : segments) {
 
             if (control.isCancelled()) return;
+            if (seg.getStatus() == SegmentStatus.COMPLETED) continue;
 
             long from = seg.getStartByte() + seg.getDownloadedBytes();
-            long to = seg.getEndByte();
-            if (from > to) continue;
+            long to   = seg.getEndByte();
 
             HttpRequest req = HttpRequest.newBuilder()
                     .uri(URI.create(task.getUrl()))
@@ -147,36 +132,48 @@ public class HttpDownloader extends AbstractDownloader {
             HttpResponse<InputStream> resp =
                     client.send(req, HttpResponse.BodyHandlers.ofInputStream());
 
+            if (resp.statusCode() != 206 && resp.statusCode() != 200) {
+                throw new RuntimeException("HTTP " + resp.statusCode());
+            }
+
+            Path tmpFile = Path.of(task.getFileName() + ".bin");
+
             try (InputStream in = resp.body();
-                 RandomAccessFile raf = new RandomAccessFile(outPath.toFile(), "rw")) {
+                 RandomAccessFile raf = new RandomAccessFile(tmpFile.toFile(), "rw")) {
 
                 raf.seek(from);
 
                 byte[] buf = new byte[8192];
                 int read;
-                long downloaded = seg.getDownloadedBytes();
 
                 while ((read = in.read(buf)) != -1) {
 
+                    if (control.isPaused()) {
+                        control.awaitResume();
+                    }
                     if (control.isCancelled()) return;
-                    control.waitIfPaused();
 
                     raf.write(buf, 0, read);
-                    downloaded += read;
+                    speed.throttle(read);
 
-                    speedControl.throttle(read);
+                    seg.setDownloadedBytes(
+                            seg.getDownloadedBytes() + read
+                    );
 
-                    callbacks.onSegmentProgress(
+                    cb.onSegmentProgress(
                             task.getId(),
                             seg.getIndex(),
-                            downloaded
+                            seg.getDownloadedBytes()
                     );
                 }
             }
+
+            seg.setStatus(SegmentStatus.COMPLETED);
         }
 
-        callbacks.onCompleted(task.getId());
+        cb.onCompleted(task.getId());
     }
+
 
     private void singleStreamDownload(DownloadTask task,
                                       Path outPath,
@@ -202,7 +199,10 @@ public class HttpDownloader extends AbstractDownloader {
             while ((read = in.read(buf)) != -1) {
 
                 if (control.isCancelled()) return;
-                control.waitIfPaused();
+                if (control.isPaused()) {
+                    control.awaitResume();
+                }
+
 
                 raf.write(buf, 0, read);
                 downloaded += read;

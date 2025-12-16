@@ -10,12 +10,14 @@ import java.util.List;
 
 public abstract class AbstractDownloader {
 
-    public final void download(DownloadTask task,
-                               List<DownloadSegment> segments,
-                               List<Peer> peers,
-                               SpeedControl speedControl,
-                               DownloadControl control,
-                               DownloadCallbacks callbacks) {
+    public final void download(
+            DownloadTask task,
+            List<DownloadSegment> segments,
+            List<Peer> peers,
+            SpeedControl speedControl,
+            DownloadControl control,
+            DownloadCallbacks callbacks)
+    {
         try {
             prepare(task, segments);
             open(task);
@@ -33,12 +35,14 @@ public abstract class AbstractDownloader {
     protected void prepare(DownloadTask task, List<DownloadSegment> segments) {}
     protected void open(DownloadTask task) {}
 
-    protected abstract void doDownload(DownloadTask task,
-                                       List<DownloadSegment> segments,
-                                       List<Peer> peers,
-                                       SpeedControl speedControl,
-                                       DownloadControl control,
-                                       DownloadCallbacks callbacks) throws Exception;
+    protected abstract void doDownload(
+            DownloadTask task,
+            List<DownloadSegment> segments,
+            List<Peer> peers,
+            SpeedControl speedControl,
+            DownloadControl control,
+            DownloadCallbacks callbacks
+    ) throws Exception;
 
     protected void finish(DownloadTask task) {}
 

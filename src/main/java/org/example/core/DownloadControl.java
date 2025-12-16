@@ -1,40 +1,35 @@
 package org.example.core;
 
-import java.util.concurrent.atomic.AtomicBoolean;
-
 public class DownloadControl {
 
-    private final AtomicBoolean cancelled = new AtomicBoolean(false);
-    private final AtomicBoolean paused = new AtomicBoolean(false);
+    private boolean paused = false;
+    private boolean cancelled = false;
 
-    public boolean isCancelled() {
-        return cancelled.get();
+    public synchronized void pause() {
+        paused = true;
     }
 
-    public boolean isPaused() {
-        return paused.get();
+    public synchronized void resume() {
+        paused = false;
+        notifyAll();
     }
 
-    public void cancel() {
-        cancelled.set(true);
+    public synchronized void cancel() {
+        cancelled = true;
+        notifyAll();
     }
 
-    public void pause() {
-        paused.set(true);
+    public synchronized boolean isPaused() {
+        return paused;
     }
 
-    public void resume() {
-        paused.set(false);
+    public synchronized boolean isCancelled() {
+        return cancelled;
     }
 
-    public void waitIfPaused() {
-        while (paused.get() && !cancelled.get()) {
-            try {
-                Thread.sleep(100);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return;
-            }
+    public synchronized void awaitResume() throws InterruptedException {
+        while (paused && !cancelled) {
+            wait();
         }
     }
 }

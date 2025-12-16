@@ -7,6 +7,10 @@ import org.example.segment.Peer;
 import org.example.segment.SegmentManager;
 import org.example.speed.SpeedControl;
 import org.example.storage.LocalStorage;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.*;
 import java.util.concurrent.CopyOnWriteArrayList;
 
@@ -16,6 +20,7 @@ public class DownloadManager {
     private final AbstractDownloader downloader;
     private final SpeedControl speedControl;
     private final SegmentManager segmentManager;
+    private final AppSettings settings;
 
     private final Map<Long, DownloadTask> tasksCache = new HashMap<>();
     private final Map<Long, DownloadControl> controls = new HashMap<>();
@@ -30,22 +35,24 @@ public class DownloadManager {
     public DownloadManager(LocalStorage storage,
                            AbstractDownloader downloader,
                            SpeedControl speedControl,
-                           SegmentManager segmentManager) {
+                           SegmentManager segmentManager,
+                           AppSettings settings) {
         this.storage = storage;
         this.downloader = downloader;
         this.speedControl = speedControl;
         this.segmentManager = segmentManager;
+        this.settings = settings;
         storage.init();
     }
 
     public void addObserver(DownloadObserver o) {
         observers.add(o);
     }
+
     public void setSpeedLimitBytesPerSec(long bytesPerSec) {
         speedControl.setMaxBytesPerSec(bytesPerSec);
         log("Speed limit set to " + bytesPerSec + " B/s");
     }
-
 
     private void notifyTaskChanged(DownloadTask t) {
         observers.forEach(o -> o.onTaskChanged(t));
@@ -55,9 +62,11 @@ public class DownloadManager {
         observers.forEach(o -> o.onLog(msg));
     }
 
-    public DownloadTask addDownload(String url, String fileName) {
-        DownloadTask task = storage.createTask(url, fileName);
+    public DownloadTask addDownload(String url, String finalPath) {
+
+        DownloadTask task = storage.createTask(url, finalPath);
         tasksCache.put(task.getId(), task);
+
         notifyTaskChanged(task);
         return task;
     }
@@ -81,38 +90,47 @@ public class DownloadManager {
         storage.updateTask(task);
         notifyTaskChanged(task);
 
-        List<DownloadSegment> segments = storage.loadSegments(taskId);
+        // 1️⃣ Загружаем сегменты
+        List<DownloadSegment> segmentsTmp = storage.loadSegments(taskId);
 
-        if (segments.isEmpty()) {
+        if (segmentsTmp.isEmpty()) {
             long total = downloader.probeContentLength(task.getUrl());
 
-            if (total <= 0) {
-                log("No Content-Length, fallback to single stream");
-                segments = Collections.emptyList();
-            } else {
+            if (total > 0) {
                 task.setTotalBytes(total);
                 storage.updateTask(task);
 
-                segments = createSegments(taskId, total, 4);
-                storage.saveSegments(taskId, segments);
+                segmentsTmp = createSegments(taskId, total, 4);
+                storage.saveSegments(taskId, segmentsTmp);
+            } else {
+                segmentsTmp = Collections.emptyList();
             }
         }
 
-        final List<DownloadSegment> segmentsFinal = segments;
-        segmentManager.setSegments(segmentsFinal);
+        // 2️⃣ ФИКС: создаём final-переменную
+        final List<DownloadSegment> segments = segmentsTmp;
+
+        segmentManager.setSegments(segments);
+
+
+        Path tmpFile = settings.getIncompleteDir()
+                .resolve(taskId + ".bin");
+
+
 
         worker = new Thread(() -> downloader.download(
                 task,
-                segmentsFinal,
+                segments,
                 peers,
                 speedControl,
                 control,
-                new Callbacks(task)
+                new Callbacks(task, tmpFile)
         ));
 
         worker.setDaemon(true);
         worker.start();
     }
+
 
     public void pause(long taskId) {
         DownloadControl c = controls.get(taskId);
@@ -121,18 +139,38 @@ public class DownloadManager {
     }
 
     public void resume(long taskId) {
+
+        // 1. Если поток жив — просто resume
         DownloadControl c = controls.get(taskId);
-        if (c != null) c.resume();
-        updateStatus(taskId, DownloadStatus.RUNNING);
+        if (c != null) {
+            c.resume();
+            updateStatus(taskId, DownloadStatus.RUNNING);
+            return;
+        }
+
+        // 2. Если потока нет — это resume после перезапуска
+        start(taskId);
     }
+
+
 
     public void stop(long taskId) {
         DownloadControl c = controls.get(taskId);
         if (c != null) c.cancel();
         updateStatus(taskId, DownloadStatus.FAILED);
     }
+
     public AbstractDownloader getDownloader() {
         return downloader;
+    }
+
+    public List<DownloadTask> getUnfinishedTasks() {
+        return storage.loadAllTasks().stream()
+                .filter(t ->
+                        t.getStatus() == DownloadStatus.PAUSED ||
+                                t.getStatus() == DownloadStatus.RUNNING
+                )
+                .toList();
     }
 
 
@@ -143,6 +181,16 @@ public class DownloadManager {
             notifyTaskChanged(t);
         });
     }
+    public void printSegments(long taskId) {
+        List<DownloadSegment> segs = storage.loadSegments(taskId);
+        for (DownloadSegment s : segs) {
+            log("Segment " + s.getIndex() +
+                    " [" + s.getStartByte() + "-" + s.getEndByte() + "] " +
+                    s.getDownloadedBytes() + "/" + s.getLength() +
+                    " status=" + s.getStatus());
+        }
+    }
+
 
     private List<DownloadSegment> createSegments(long taskId, long total, int count) {
         List<DownloadSegment> list = new ArrayList<>();
@@ -160,9 +208,11 @@ public class DownloadManager {
     private class Callbacks implements AbstractDownloader.DownloadCallbacks {
 
         private final DownloadTask task;
+        private final Path tmpFile;
 
-        Callbacks(DownloadTask task) {
+        Callbacks(DownloadTask task, Path tmpFile) {
             this.task = task;
+            this.tmpFile = tmpFile;
         }
 
         @Override
@@ -173,30 +223,39 @@ public class DownloadManager {
             for (DownloadSegment s : segs) {
                 if (s.getIndex() == idx) {
                     s.setDownloadedBytes(downloaded);
-                    s.setStatus(
-                            downloaded >= s.getLength()
-                                    ? SegmentStatus.COMPLETED
-                                    : SegmentStatus.RUNNING
-                    );
                     storage.updateSegment(s);
                 }
             }
 
-            long sum = segs.stream().mapToLong(DownloadSegment::getDownloadedBytes).sum();
+            long sum = segs.stream()
+                    .mapToLong(DownloadSegment::getDownloadedBytes)
+                    .sum();
+
             task.setDownloadedBytes(sum);
             storage.updateTask(task);
             notifyTaskChanged(task);
         }
 
+
         @Override public void onLog(String msg) { log(msg); }
 
         @Override
         public void onCompleted(long taskId) {
+            try {
+                Files.move(
+                        tmpFile,
+                        Path.of(task.getFileName()),
+                        StandardCopyOption.REPLACE_EXISTING
+                );
+            } catch (Exception e) {
+                log("Move failed: " + e.getMessage());
+            }
+
             task.setStatus(DownloadStatus.COMPLETED);
             storage.updateTask(task);
             notifyTaskChanged(task);
-            log("Task completed: " + taskId);
         }
+
 
         @Override
         public void onError(long taskId, Exception e) {
@@ -206,17 +265,4 @@ public class DownloadManager {
             log("Task failed: " + e.getMessage());
         }
     }
-
-    public void printSegments(long taskId) {
-        List<DownloadSegment> segs = storage.loadSegments(taskId);
-        segmentManager.setSegments(segs);
-
-        for (DownloadSegment s : segmentManager) {
-            log("Segment idx=" + s.getIndex()
-                    + " range=" + s.getStartByte() + "-" + s.getEndByte()
-                    + " downloaded=" + s.getDownloadedBytes()
-                    + " status=" + s.getStatus());
-        }
-    }
-
 }

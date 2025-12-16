@@ -1,5 +1,6 @@
 package org.example.ui;
 
+import org.example.core.AppSettings;
 import org.example.core.DownloadManager;
 import org.example.downloader.HttpDownloader;
 import org.example.segment.SegmentManager;
@@ -19,12 +20,14 @@ public class Main {
         var downloader = new HttpDownloader();
         var speedControl = new SpeedControl(0);
         var segmentManager = new SegmentManager();
+        var settings = AppSettings.load();
 
         var manager = new DownloadManager(
                 storage,
                 downloader,
                 speedControl,
-                segmentManager
+                segmentManager,
+                settings
         );
 
         var task = manager.addDownload(
